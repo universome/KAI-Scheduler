@@ -36,8 +36,8 @@ func (r *Reclaimable) CanReclaimResources(
 	requestedResources := utils.QuantifyVector(reclaimer.RequiredResources, reclaimer.VectorMap)
 
 	allocatedResources := reclaimerQueue.GetAllocatedShare()
-	allocatedResources.Add(requestedResources)
-	if !allocatedResources.LessEqual(reclaimerQueue.GetFairShare()) {
+	allocatedResources.Sub(reclaimer.Displaceable)
+	if !fitsFairShare(reclaimerQueue, allocatedResources, requestedResources) {
 		return false
 	}
 
@@ -86,8 +86,9 @@ func (r *Reclaimable) reclaimResourcesFromReclaimees(
 		}
 		remainingResources := remainingResourcesMap[reclaimeeQueue.UID]
 
+		isReclaimerQueue := reclaimeeQueueID == reclaimer.Queue
 		for _, reclaimeeResources := range reclaimeeQueueReclaimedResources {
-			if !strategies.FitsReclaimStrategy(reclaimer.RequiredResources, reclaimer.VectorMap, reclaimerQueue, reclaimeeQueue,
+			if !isReclaimerQueue && !strategies.FitsReclaimStrategy(reclaimer.RequiredResources, reclaimer.VectorMap, reclaimerQueue, reclaimeeQueue,
 				remainingResources) {
 				log.InfraLogger.V(7).Infof("queue <%s>，shouldn't be reclaimed, for %s resources"+
 					" remaining reosurces: <%s>, deserved: <%s>, fairShare: <%s>",
@@ -147,6 +148,17 @@ func (r *Reclaimable) reclaimingQueuesRemainWithinBoundaries(
 		}
 		remainingResources.Add(requestedQuota)
 
+		// CanReclaimResources may have admitted the reclaimer by discounting its Displaceable resources, so the queue
+		// must end within its fair share with only the own-queue victims that the scenario actually evicts subtracted.
+		if reclaimingQueue.UID == reclaimer.Queue && hasPositiveQuantity(reclaimer.Displaceable) &&
+			!remainingResources.LessEqual(reclaimingQueue.GetFairShare()) {
+			log.InfraLogger.V(5).Infof("Failed to reclaim resources for job: <%s/%s>. "+
+				"Queue <%s> would end over its fair share: allocated with job: %s, fairShare: %s",
+				reclaimer.Namespace, reclaimer.Name, reclaimingQueue.Name, remainingResources,
+				reclaimingQueue.GetFairShare())
+			return false
+		}
+
 		for siblingID := range remainingResourcesMap {
 			sibling := queues[siblingID]
 			if sibling.ParentQueue != reclaimingQueue.ParentQueue || sibling.UID == reclaimingQueue.UID {
@@ -189,6 +201,21 @@ func (r *Reclaimable) reclaimingQueuesRemainWithinBoundaries(
 	}
 
 	return true
+}
+
+func hasPositiveQuantity(quantities rs.ResourceQuantities) bool {
+	for _, quantity := range quantities {
+		if quantity > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func fitsFairShare(queue *rs.QueueAttributes, allocated rs.ResourceQuantities, requested rs.ResourceQuantities) bool {
+	allocatedWithRequested := allocated.Clone()
+	allocatedWithRequested.Add(requested)
+	return allocatedWithRequested.LessEqual(queue.GetFairShare())
 }
 
 // isFairShareSaturationLowerPerResource returns true if for every resource the

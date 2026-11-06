@@ -62,6 +62,9 @@ func GetMessageOfEviction(ssn *framework.Session, actionType framework.ActionTyp
 				"Failed to get preemptee job for task: <%s/%s>", preempteeTask.Namespace, preempteeTask.Name)
 			return ""
 		}
+		if preempteeJob.Queue == preemptorJob.Queue {
+			return api.GetPreemptMessage(preemptorJob, preempteeTask)
+		}
 		reclaimerQueue := ssn.ClusterInfo.Queues[preemptorJob.Queue]
 		reclaimerParentQueue := ssn.ClusterInfo.Queues[reclaimerQueue.ParentQueue]
 		reclaimeeQueue := ssn.ClusterInfo.Queues[preempteeJob.Queue]

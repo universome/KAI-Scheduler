@@ -152,7 +152,7 @@ func getOrderedVictimsQueue(ssn *framework.Session, reclaimer *podgroup_info.Pod
 		})
 		jobs := map[common_info.PodGroupID]*podgroup_info.PodGroupInfo{}
 		for _, job := range ssn.ClusterInfo.PodGroupInfos {
-			if job.Queue == reclaimer.Queue {
+			if job.Queue == reclaimer.Queue && !common.IsPreemptVictim(ssn, reclaimer, job) {
 				continue
 			}
 			if !ssn.ReclaimVictimFilter(reclaimer, job) {

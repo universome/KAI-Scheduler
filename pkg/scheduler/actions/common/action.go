@@ -46,6 +46,32 @@ func EvictAllPreemptees(ssn *framework.Session, preempteeTasks []*pod_info.PodIn
 	return nil
 }
 
+// IsPreemptVictim returns true when job is an active, preemptible, lower-priority job of the preemptor's own queue
+// that the preempt victim filters allow evicting.
+func IsPreemptVictim(ssn *framework.Session, preemptor *podgroup_info.PodGroupInfo, job *podgroup_info.PodGroupInfo) bool {
+	if !job.IsPreemptibleJob() {
+		return false
+	}
+
+	if job.Priority >= preemptor.Priority {
+		return false
+	}
+
+	if job.Queue != preemptor.Queue {
+		return false
+	}
+
+	if preemptor.UID == job.UID {
+		return false
+	}
+
+	if job.GetActiveAllocatedTasksCount() == 0 {
+		return false
+	}
+
+	return ssn.PreemptVictimFilter(preemptor, job)
+}
+
 // getEvictionMessages generates all eviction message based on the state before any task was evicted
 func getEvictionMessages(ssn *framework.Session, tasks []*pod_info.PodInfo, preemptor *podgroup_info.PodGroupInfo,
 	actionType framework.ActionType) map[common_info.PodID]string {

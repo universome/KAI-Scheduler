@@ -9,6 +9,7 @@ import (
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/resource_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/proportion/reclaimable/strategies"
 	rs "github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/proportion/resource_share"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/plugins/proportion/utils"
 )
 
 // FilterVictim removes victims that cannot be reclaimed by any proportion reclaim strategy.
@@ -19,6 +20,13 @@ func (r *Reclaimable) FilterVictim(
 ) bool {
 	if reclaimer == nil {
 		return true
+	}
+
+	// Own-queue jobs are victims only when the reclaimer cannot fit the queue's fair share without displacing them.
+	if reclaimeeQueueID == reclaimer.Queue {
+		reclaimerQueue := queues[reclaimer.Queue]
+		requested := utils.QuantifyVector(reclaimer.RequiredResources, reclaimer.VectorMap)
+		return !fitsFairShare(reclaimerQueue, reclaimerQueue.GetAllocatedShare(), requested)
 	}
 
 	reclaimerQueue, reclaimeeQueue := r.getLeveledQueues(queues, reclaimer.Queue, reclaimeeQueueID)

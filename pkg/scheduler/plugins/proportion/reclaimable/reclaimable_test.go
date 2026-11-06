@@ -1193,6 +1193,114 @@ var _ = Describe("FilterVictim", func() {
 	})
 })
 
+var _ = Describe("Reclaimable - displacing lower priority jobs of the reclaimer queue", func() {
+	var (
+		reclaimerInfo *ReclaimerInfo
+		queues        map[common_info.QueueID]*rs.QueueAttributes
+		reclaimable   *Reclaimable
+	)
+	otherQueueVictim := resource_info.NewResource(16, 0, 2).ToVector(testVectorMap)
+
+	BeforeEach(func() {
+		// research is under its GPU fair share and over its CPU fair share only because of its own lower-priority CPU
+		// jobs, while posttrain is over its GPU fair share. posttrain is also more CPU-saturated than research, so the
+		// sibling saturation check alone does not reject scenarios that leave research over its fair share.
+		reclaimerInfo = &ReclaimerInfo{
+			Name:              "reclaimer",
+			Namespace:         "n1",
+			Queue:             "research",
+			IsPreemptable:     true,
+			RequiredResources: resource_info.NewResource(16, 0, 2).ToVector(testVectorMap),
+			VectorMap:         testVectorMap,
+		}
+		queues = map[common_info.QueueID]*rs.QueueAttributes{
+			"research":  buildCPUAndGPUQueue("research", "rhoda", resourceTestData{160, 160, 400}, resourceTestData{8, 8, 0}),
+			"posttrain": buildCPUAndGPUQueue("posttrain", "rhoda", resourceTestData{160, 160, 1000}, resourceTestData{160, 160, 260}),
+			"rhoda":     buildCPUAndGPUQueue("rhoda", "", resourceTestData{320, 320, 1400}, resourceTestData{168, 168, 260}),
+		}
+		reclaimable = New(1.0)
+	})
+
+	Context("CanReclaimResources", func() {
+		It("refuses when the queue is over its fair share and nothing is displaceable", func() {
+			Expect(reclaimable.CanReclaimResources(queues, reclaimerInfo)).To(BeFalse())
+		})
+		It("allows when displacing the queue's lower priority jobs brings it within its fair share", func() {
+			reclaimerInfo.Displaceable = rs.NewResourceQuantities(384, 0, 0)
+			Expect(reclaimable.CanReclaimResources(queues, reclaimerInfo)).To(BeTrue())
+		})
+		It("refuses when displacing the queue's lower priority jobs is not enough to fit its fair share", func() {
+			reclaimerInfo.Displaceable = rs.NewResourceQuantities(200, 0, 0)
+			Expect(reclaimable.CanReclaimResources(queues, reclaimerInfo)).To(BeFalse())
+		})
+	})
+
+	Context("Reclaimable", func() {
+		BeforeEach(func() {
+			reclaimerInfo.Displaceable = rs.NewResourceQuantities(384, 0, 0)
+		})
+		It("accepts a scenario evicting own-queue jobs and another queue's over fair share job", func() {
+			victims := map[common_info.QueueID][]resource_info.ResourceVector{
+				"research":  {resource_info.NewResource(384, 0, 0).ToVector(testVectorMap)},
+				"posttrain": {otherQueueVictim},
+			}
+			Expect(reclaimable.Reclaimable(queues, reclaimerInfo, victims)).To(BeTrue())
+		})
+		It("rejects a scenario that keeps the own-queue jobs running", func() {
+			victims := map[common_info.QueueID][]resource_info.ResourceVector{
+				"posttrain": {otherQueueVictim},
+			}
+			Expect(reclaimable.Reclaimable(queues, reclaimerInfo, victims)).To(BeFalse())
+		})
+		It("rejects a scenario whose own-queue evictions leave the queue over its fair share", func() {
+			victims := map[common_info.QueueID][]resource_info.ResourceVector{
+				"research":  {resource_info.NewResource(200, 0, 0).ToVector(testVectorMap)},
+				"posttrain": {otherQueueVictim},
+			}
+			Expect(reclaimable.Reclaimable(queues, reclaimerInfo, victims)).To(BeFalse())
+		})
+	})
+
+	Context("FilterVictim", func() {
+		It("keeps own-queue victims when the queue must displace jobs to fit its fair share", func() {
+			Expect(reclaimable.FilterVictim(queues, reclaimerInfo, "research")).To(BeTrue())
+		})
+		It("filters own-queue victims when the queue fits its fair share without them", func() {
+			queues["research"].CPU.Allocated = 0
+			Expect(reclaimable.FilterVictim(queues, reclaimerInfo, "research")).To(BeFalse())
+		})
+	})
+})
+
+type resourceTestData struct {
+	deserved  float64
+	fairShare float64
+	allocated float64
+}
+
+func buildCPUAndGPUQueue(uid, parent common_info.QueueID, cpu, gpu resourceTestData) *rs.QueueAttributes {
+	return &rs.QueueAttributes{
+		UID:         uid,
+		Name:        string(uid),
+		ParentQueue: parent,
+		QueueResourceShare: rs.QueueResourceShare{
+			GPU: rs.ResourceShare{
+				Deserved:   gpu.deserved,
+				FairShare:  gpu.fairShare,
+				Allocated:  gpu.allocated,
+				MaxAllowed: commonconstants.UnlimitedResourceQuantity,
+			},
+			CPU: rs.ResourceShare{
+				Deserved:   cpu.deserved,
+				FairShare:  cpu.fairShare,
+				Allocated:  cpu.allocated,
+				MaxAllowed: commonconstants.UnlimitedResourceQuantity,
+			},
+			Memory: rs.ResourceShare{},
+		},
+	}
+}
+
 func buildQueues(queuesData map[common_info.QueueID]queuesTestData) map[common_info.QueueID]*rs.QueueAttributes {
 	queues := map[common_info.QueueID]*rs.QueueAttributes{}
 	for name, queueData := range queuesData {

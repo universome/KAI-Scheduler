@@ -62,6 +62,8 @@ type proportionPlugin struct {
 	relcaimerSaturationMultiplier float64
 	kValue                        float64
 	minNodeGPUMemory              *int64
+	podGroupInfos                 map[common_info.PodGroupID]*podgroup_info.PodGroupInfo
+	displaceableByReclaimer       map[common_info.PodGroupID]rs.ResourceQuantities
 }
 
 func New(arguments framework.PluginArguments) framework.Plugin {
@@ -101,6 +103,8 @@ func (pp *proportionPlugin) OnSessionOpen(ssn *framework.Session) {
 	pp.subGroupOrderFn = ssn.SubGroupOrderFn
 	pp.taskOrderFunc = ssn.TaskOrderFn
 	pp.minNodeGPUMemory = ssn.ClusterInfo.MinNodeGPUMemoryMiB
+	pp.podGroupInfos = ssn.ClusterInfo.PodGroupInfos
+	pp.displaceableByReclaimer = map[common_info.PodGroupID]rs.ResourceQuantities{}
 	pp.reclaimablePlugin = rec.New(pp.relcaimerSaturationMultiplier)
 	capacityPolicy := cp.New(pp.queues, ssn.ClusterInfo.MaxNodeGPUMemoryMiB)
 	ssn.AddQueueOrderFn(pp.queueOrder)
@@ -127,6 +131,8 @@ func (pp *proportionPlugin) OnSessionOpen(ssn *framework.Session) {
 func (pp *proportionPlugin) OnSessionClose(*framework.Session) {
 	pp.totalResource = nil
 	pp.queues = nil
+	pp.podGroupInfos = nil
+	pp.displaceableByReclaimer = nil
 }
 
 func (pp *proportionPlugin) OnJobSolutionStartFn() {
@@ -138,7 +144,28 @@ func (pp *proportionPlugin) OnJobSolutionStartFn() {
 
 func (pp *proportionPlugin) CanReclaimResourcesFn(reclaimer *podgroup_info.PodGroupInfo) bool {
 	reclaimerInfo := pp.buildReclaimerInfo(reclaimer, pp.minNodeGPUMemory)
+	reclaimerInfo.Displaceable = getDisplaceableResources(reclaimer, pp.podGroupInfos)
+	// Kept from before the scenario simulation, which marks evicted victims as Releasing.
+	pp.displaceableByReclaimer[reclaimer.UID] = reclaimerInfo.Displaceable
 	return pp.reclaimablePlugin.CanReclaimResources(pp.queues, reclaimerInfo)
+}
+
+func getDisplaceableResources(
+	reclaimer *podgroup_info.PodGroupInfo, jobs map[common_info.PodGroupID]*podgroup_info.PodGroupInfo,
+) rs.ResourceQuantities {
+	displaceable := rs.EmptyResourceQuantities()
+	for _, job := range jobs {
+		if job.Queue != reclaimer.Queue || job.UID == reclaimer.UID || !job.IsPreemptibleJob() ||
+			job.Priority >= reclaimer.Priority {
+			continue
+		}
+		for _, task := range job.GetAllPodsMap() {
+			if pod_status.AllocatedStatus(task.Status) {
+				displaceable.Add(utils.QuantifyVector(task.AcceptedResourceVector, task.VectorMap))
+			}
+		}
+	}
+	return displaceable
 }
 
 func (pp *proportionPlugin) reclaimVictimFilterFn(
@@ -151,7 +178,9 @@ func (pp *proportionPlugin) reclaimVictimFilterFn(
 func (pp *proportionPlugin) reclaimableFn(
 	scenario api.ScenarioInfo,
 ) bool {
-	reclaimerInfo := pp.buildReclaimerInfo(scenario.GetPreemptor(), pp.minNodeGPUMemory)
+	reclaimer := scenario.GetPreemptor()
+	reclaimerInfo := pp.buildReclaimerInfo(reclaimer, pp.minNodeGPUMemory)
+	reclaimerInfo.Displaceable = pp.displaceableByReclaimer[reclaimer.UID]
 	totalVictimsResources := make(map[common_info.QueueID][]resource_info.ResourceVector)
 	victims := scenario.GetVictims()
 	for _, victim := range victims {

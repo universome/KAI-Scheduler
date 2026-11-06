@@ -147,32 +147,7 @@ func shouldStopActionForSearchResult(result *solvers.SearchResult) bool {
 
 func buildFilterFuncForPreempt(ssn *framework.Session, preemptor *podgroup_info.PodGroupInfo) func(*podgroup_info.PodGroupInfo) bool {
 	return func(job *podgroup_info.PodGroupInfo) bool {
-		if !job.IsPreemptibleJob() {
-			return false
-		}
-
-		if job.Priority >= preemptor.Priority {
-			return false
-		}
-
-		if job.Queue != preemptor.Queue {
-			return false
-		}
-
-		// Preempt other jobs
-		if preemptor.UID == job.UID {
-			return false
-		}
-
-		if job.GetActiveAllocatedTasksCount() == 0 {
-			return false
-		}
-
-		if !ssn.PreemptVictimFilter(preemptor, job) {
-			return false
-		}
-
-		return true
+		return common.IsPreemptVictim(ssn, preemptor, job)
 	}
 }
 
