@@ -56,9 +56,10 @@ func newSubScenarioEmitter(
 	baseNodes map[string]*node_info.NodeInfo,
 ) *subScenarioEmitter {
 	pendingDemand, minPendingTask := pendingTaskGpuStats(base)
-	recordedFreed := recordedFreedByNode(base)
+	recordedEvictions := node_info.NewSharedGpuEvictions(session.ClusterInfo.Nodes)
+	recordedFreed := recordedFreedByNode(base, recordedEvictions)
 	batches, nodeBatches, nodeFirstSeenAt := buildVictimBatches(base)
-	nodeCap := nodeCapacities(session, batches, nodeBatches, recordedFreed)
+	nodeCap := nodeCapacities(session, batches, nodeBatches, recordedFreed, recordedEvictions)
 	candidates := sortViableCandidates(nodeBatches, nodeCap, nodeFirstSeenAt, minPendingTask)
 	baseline := baselineCapacity(baseNodes, nodeBatches, recordedFreed)
 
@@ -128,13 +129,13 @@ func (sse *subScenarioEmitter) advanceNextK(currentK int) {
 // scenario's recorded victims (committed evictions from prior solver iterations) get
 // evicted. The recorded set is the same across every sub-scenario, so its
 // per-node contribution is a fixed input to capacity accounting.
-func recordedFreedByNode(base *scenario.ByNodeScenario) map[string]float64 {
+func recordedFreedByNode(base *scenario.ByNodeScenario, evictions *node_info.SharedGpuEvictions) map[string]float64 {
 	out := map[string]float64{}
 	for _, victim := range base.RecordedVictimsTasks() {
 		if victim.NodeName == "" {
 			continue
 		}
-		out[victim.NodeName] += victim.AcceptedGpuRequirement.GetGpusQuota()
+		out[victim.NodeName] += evictions.Credit(victim)
 	}
 	return out
 }
@@ -194,6 +195,7 @@ func nodeCapacities(
 	session *framework.Session,
 	batches []victimBatch, nodeBatches map[string][]int,
 	recordedFreed map[string]float64,
+	recordedEvictions *node_info.SharedGpuEvictions,
 ) map[string]float64 {
 	out := map[string]float64{}
 	for nodeName, batchIdxs := range nodeBatches {
@@ -204,7 +206,7 @@ func nodeCapacities(
 		for _, bi := range batchIdxs {
 			for _, t := range batches[bi].tasks {
 				if t.NodeName == nodeName {
-					c += t.AcceptedGpuRequirement.GetGpusQuota()
+					c += recordedEvictions.Credit(t)
 				}
 			}
 		}
@@ -225,7 +227,7 @@ func sortViableCandidates(
 ) []string {
 	out := make([]string, 0, len(nodeBatches))
 	for nodeName := range nodeBatches {
-		if minPendingTask > 0 && nodeCap[nodeName] < minPendingTask {
+		if minPendingTask > 0 && !node_info.GpusCover(nodeCap[nodeName], minPendingTask) {
 			continue
 		}
 		out = append(out, nodeName)
@@ -284,7 +286,7 @@ func smallestKCovering[T any](items []T, demand float64, capacityOf func(T) floa
 	cumulative := 0.0
 	for i, item := range items {
 		cumulative += capacityOf(item)
-		if cumulative >= demand {
+		if node_info.GpusCover(cumulative, demand) {
 			return i + 1
 		}
 	}

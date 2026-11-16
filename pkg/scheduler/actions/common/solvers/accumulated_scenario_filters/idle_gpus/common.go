@@ -46,11 +46,11 @@ func greedyMatchRequirements[K comparable](
 			totalCapacity := capacity(holder)
 			// Early termination: holders are sorted descending by capacity.
 			// If the best total capacity is below required, no holder can satisfy it.
-			if totalCapacity < required {
+			if !node_info.GpusCover(totalCapacity, required) {
 				break
 			}
 			available := totalCapacity - virtuallyAllocated[holder]
-			if available >= required {
+			if node_info.GpusCover(available, required) {
 				virtuallyAllocated[holder] += required
 				matched = true
 				break
